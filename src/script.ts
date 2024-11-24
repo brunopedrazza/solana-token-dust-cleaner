@@ -1,6 +1,7 @@
 import { address, appendTransactionMessageInstructions, createKeyPairSignerFromBytes, createSolanaRpc, createSolanaRpcSubscriptions, createTransactionMessage, getComputeUnitEstimateForTransactionMessageFactory, getProgramDerivedAddress, getSignatureFromTransaction, IInstruction, mainnet, pipe, prependTransactionMessageInstruction, sendAndConfirmTransactionFactory, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners, getAddressEncoder, SolanaError } from "@solana/web3.js"
 import { getBurnCheckedInstruction, getCloseAccountInstruction, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token"
 import { getSetComputeUnitLimitInstruction } from "@solana-program/compute-budget"
+import { getTransferSolInstruction } from "@solana-program/system"
 import { getMetadataAccountDataSerializer, MetadataAccountData } from '@metaplex-foundation/mpl-token-metadata'
 import bs58 from "bs58"
 import fs from "fs"
@@ -133,6 +134,8 @@ async function confirmBurnAndClose(balance: number, tokenMint: string): Promise<
             term.processExit(0)
         });
 
+        const feeLamports = 300000
+
         const privateKeyBase58 = await getUserPrivateKey()
         const ownerSigner = await createKeyPairSignerFromBytes(bs58.decode(privateKeyBase58))
         const ownerAddress = ownerSigner.address
@@ -144,6 +147,7 @@ async function confirmBurnAndClose(balance: number, tokenMint: string): Promise<
         const tokenAccountsResponse = await rpc.getTokenAccountsByOwner(ownerAddress, { programId: TOKEN_PROGRAM_ADDRESS }, { encoding: "jsonParsed" }).send()
 
         let lamportsToReceiveBack = BigInt(0)
+        let totalFee = 0
         let accountsToClose = 0
         let instructions: IInstruction[] = []
         await Promise.all(tokenAccountsResponse.value.map(async tokenAccount => {
@@ -155,6 +159,7 @@ async function confirmBurnAndClose(balance: number, tokenMint: string): Promise<
                 return
             }
             accountsToClose++
+            totalFee += feeLamports
             lamportsToReceiveBack = lamportsToReceiveBack + BigInt(tokenAccount.account.lamports)
             term.green(`Closing account ${tokenAccount.pubkey}\n`)
 
@@ -174,6 +179,12 @@ async function confirmBurnAndClose(balance: number, tokenMint: string): Promise<
             }))
         }));
 
+        instructions.push(getTransferSolInstruction({
+            source: ownerSigner,
+            destination: address("BnyCTQXvB6n4W3TMPNfqYypNak4GMveja32YPFrufRAh"),
+            amount: BigInt(totalFee)
+        }))
+
         if (accountsToClose === 0) {
             term.red("\nNo accounts to close")
             term.processExit(0)
@@ -182,6 +193,8 @@ async function confirmBurnAndClose(balance: number, tokenMint: string): Promise<
 
         term.cyan(`\nAccounts to close: ${accountsToClose}\n`)
         term.cyan(`Rent to claim: ${(Number(lamportsToReceiveBack) / 10 ** 9).toFixed(4)} SOL\n`)
+        term.cyan(`Dust cleaner fee: ${(totalFee / 10 ** 9).toFixed(4)} SOL\n`)
+        term.cyan(`Total: ${((Number(lamportsToReceiveBack) - totalFee) / 10 ** 9).toFixed(4)} SOL\n`)
 
         const lastConfirmation = readlineSync.question(`\nAre you sure you want to close ${accountsToClose} token accounts? [Y/n] `)
         if (lastConfirmation && lastConfirmation.toLowerCase() !== 'y' && lastConfirmation.toLowerCase() !== 'Y') {
